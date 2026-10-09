@@ -405,6 +405,38 @@ type CriterioCatalogo = {
 
 const POR_PAGINA = 25
 
+// PostgREST corta cada respuesta en 1.000 filas — las tablas de criterios
+// tienen 3.500+ (Res.1732/Res.3100), así que las opciones de los filtros
+// (valores distintos de Estándar/Página/Numerales…) se arman leyendo todas
+// las filas por bloques; si no, quedaban opciones faltantes.
+async function leerTodasLasFilas<T>(
+  armarQuery: () => { range: (desde: number, hasta: number) => PromiseLike<{ data: unknown }> },
+): Promise<T[]> {
+  const BLOQUE = 1000
+  const filas: T[] = []
+  for (let desde = 0; ; desde += BLOQUE) {
+    const { data } = await armarQuery().range(desde, desde + BLOQUE - 1)
+    const lote = (data ?? []) as T[]
+    filas.push(...lote)
+    if (lote.length < BLOQUE) break
+  }
+  return filas
+}
+
+// Orden "natural" para numerales y páginas: 11.2 < 11.10, 2 < 10.
+function ordenNatural(a: string, b: string) {
+  return a.localeCompare(b, 'es', { numeric: true })
+}
+
+type FilaOpcionesFiltro = {
+  estandar: string
+  complejidad: string
+  modalidad: string | null
+  pagina: string | number | null
+  numeral_grupo: string
+  numeral_servicio: string
+}
+
 function CriteriosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
   const cfg = RESOLUCIONES[resolucion]
   const [criterios, setCriterios] = useState<CriterioCatalogo[]>([])
@@ -417,6 +449,17 @@ function CriteriosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
   // Multi-selección (pedido 2026-08-28, punto 8): arrays vacíos = "Todas".
   const [complejidadFiltro, setComplejidadFiltro] = useState<string[]>([])
   const [modalidadFiltro, setModalidadFiltro] = useState<string[]>([])
+  // Filtros para la revisión manual de la data cargada contra el PDF (pedido
+  // 2026-10-09, punto 2): No. e Item como texto (coincidencia exacta);
+  // Página y Numerales como desplegables con los valores reales.
+  const [numeroFiltro, setNumeroFiltro] = useState('')
+  const [itemFiltro, setItemFiltro] = useState('')
+  const [paginaFiltro, setPaginaFiltro] = useState('')
+  const [numeralGrupoFiltro, setNumeralGrupoFiltro] = useState('')
+  const [numeralServicioFiltro, setNumeralServicioFiltro] = useState('')
+  const [opcionesPaginaFiltro, setOpcionesPaginaFiltro] = useState<string[]>([])
+  const [opcionesNumeralGrupoFiltro, setOpcionesNumeralGrupoFiltro] = useState<string[]>([])
+  const [opcionesNumeralServicioFiltro, setOpcionesNumeralServicioFiltro] = useState<string[]>([])
   const [serviciosFull, setServiciosFull] = useState<{ id: number; nombre: string; grupo_id: number; activo: boolean }[]>([])
   const [grupos, setGrupos] = useState<Grupo[]>([])
   // Globales, sin filtrar — alimentan el modal de edición (ahí sí se puede
@@ -455,15 +498,13 @@ function CriteriosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
       .then(({ data }) => setGrupos((data as Grupo[]) ?? []))
     // Opciones globales (modal): valores reales ya existentes en la tabla,
     // para no permitir texto libre suelto.
-    supabase
-      .from(cfg.tablaCriterios)
-      .select('estandar, complejidad, modalidad')
-      .then(({ data }) => {
-        const filas = data ?? []
-        setOpcionesEstandar(Array.from(new Set(filas.map((f) => f.estandar).filter(Boolean))).sort())
-        setOpcionesComplejidad(Array.from(new Set(filas.map((f) => f.complejidad).filter(Boolean))).sort())
-        setOpcionesModalidad(Array.from(new Set(filas.map((f) => f.modalidad).filter(Boolean))).sort() as string[])
-      })
+    leerTodasLasFilas<FilaOpcionesFiltro>(() =>
+      supabase.from(cfg.tablaCriterios).select('estandar, complejidad, modalidad').order('id'),
+    ).then((filas) => {
+      setOpcionesEstandar(Array.from(new Set(filas.map((f) => f.estandar).filter(Boolean))).sort())
+      setOpcionesComplejidad(Array.from(new Set(filas.map((f) => f.complejidad).filter(Boolean))).sort())
+      setOpcionesModalidad(Array.from(new Set(filas.map((f) => f.modalidad).filter(Boolean))).sort() as string[])
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolucion])
 
@@ -482,15 +523,30 @@ function CriteriosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
   useEffect(() => {
     let cancelado = false
     async function cargarOpcionesFiltro() {
-      let q = supabase.from(cfg.tablaCriterios).select('estandar, complejidad, modalidad')
-      if (grupoFiltro) q = q.eq(cfg.columnaGrupoId, grupoFiltro)
-      if (servicioFiltro) q = q.eq(cfg.columnaServicioId, servicioFiltro)
-      const { data } = await q
+      const filas = await leerTodasLasFilas<FilaOpcionesFiltro>(() => {
+        let q = supabase
+          .from(cfg.tablaCriterios)
+          .select('estandar, complejidad, modalidad, pagina, numeral_grupo, numeral_servicio')
+          .order('id')
+        if (grupoFiltro) q = q.eq(cfg.columnaGrupoId, grupoFiltro)
+        if (servicioFiltro) q = q.eq(cfg.columnaServicioId, servicioFiltro)
+        return q
+      })
       if (cancelado) return
-      const filas = data ?? []
       const estandares = Array.from(new Set(filas.map((f) => f.estandar).filter(Boolean))).sort()
       const complejidades = Array.from(new Set(filas.map((f) => f.complejidad).filter(Boolean))).sort()
       const modalidades = Array.from(new Set(filas.map((f) => f.modalidad).filter(Boolean))).sort() as string[]
+      const paginas = Array.from(
+        new Set(filas.map((f) => (f.pagina == null ? '' : String(f.pagina))).filter(Boolean)),
+      ).sort(ordenNatural)
+      const numeralesGrupo = Array.from(new Set(filas.map((f) => f.numeral_grupo).filter(Boolean))).sort(ordenNatural)
+      const numeralesServicio = Array.from(new Set(filas.map((f) => f.numeral_servicio).filter(Boolean))).sort(ordenNatural)
+      setOpcionesPaginaFiltro(paginas)
+      setOpcionesNumeralGrupoFiltro(numeralesGrupo)
+      setOpcionesNumeralServicioFiltro(numeralesServicio)
+      setPaginaFiltro((prev) => (prev && !paginas.includes(prev) ? '' : prev))
+      setNumeralGrupoFiltro((prev) => (prev && !numeralesGrupo.includes(prev) ? '' : prev))
+      setNumeralServicioFiltro((prev) => (prev && !numeralesServicio.includes(prev) ? '' : prev))
       setOpcionesEstandarFiltro(estandares)
       setOpcionesComplejidadFiltro(complejidades)
       setOpcionesModalidadFiltro(modalidades)
@@ -508,7 +564,20 @@ function CriteriosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
   useEffect(() => {
     cargar()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pagina, busqueda, servicioFiltro, grupoFiltro, estandarFiltro, complejidadFiltro, modalidadFiltro])
+  }, [
+    pagina,
+    busqueda,
+    servicioFiltro,
+    grupoFiltro,
+    estandarFiltro,
+    complejidadFiltro,
+    modalidadFiltro,
+    numeroFiltro,
+    itemFiltro,
+    paginaFiltro,
+    numeralGrupoFiltro,
+    numeralServicioFiltro,
+  ])
 
   // Reusado por cargar() (paginado) y exportarExcel() (sin paginar) para que
   // el Excel siempre coincida exactamente con los filtros activos en pantalla.
@@ -524,6 +593,13 @@ function CriteriosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
     if (estandarFiltro) query = query.eq('estandar', estandarFiltro)
     if (complejidadFiltro.length > 0) query = query.in('complejidad', complejidadFiltro)
     if (modalidadFiltro.length > 0) query = query.in('modalidad', modalidadFiltro)
+    // No. es columna integer: si se escribe algo que no son dígitos se ignora
+    // en vez de mandar una consulta que Postgres rechazaría.
+    if (/^\d+$/.test(numeroFiltro.trim())) query = query.eq('numero', Number(numeroFiltro.trim()))
+    if (itemFiltro.trim()) query = query.eq('item', itemFiltro.trim())
+    if (paginaFiltro) query = query.eq('pagina', paginaFiltro)
+    if (numeralGrupoFiltro) query = query.eq('numeral_grupo', numeralGrupoFiltro)
+    if (numeralServicioFiltro) query = query.eq('numeral_servicio', numeralServicioFiltro)
     return query
   }
 
@@ -551,6 +627,11 @@ function CriteriosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
           ['Estándar', estandarFiltro || 'Todos'],
           ['Complejidad', complejidadFiltro.length ? complejidadFiltro.join(', ') : 'Todas'],
           ['Modalidad', modalidadFiltro.length ? modalidadFiltro.join(', ') : 'Todas'],
+          ['No.', numeroFiltro.trim() || 'Todos'],
+          ['Item', itemFiltro.trim() || 'Todos'],
+          ['Página', paginaFiltro || 'Todas'],
+          ['Numeral grupo', numeralGrupoFiltro || 'Todos'],
+          ['Numeral servicio', numeralServicioFiltro || 'Todos'],
         ],
         criterios: filas.map((c) => ({
           numero: c.numero,
@@ -581,6 +662,18 @@ function CriteriosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
   }
 
   const totalPaginas = Math.max(1, Math.ceil(total / POR_PAGINA))
+  const hayFiltros =
+    !!busqueda ||
+    !!servicioFiltro ||
+    !!grupoFiltro ||
+    !!estandarFiltro ||
+    complejidadFiltro.length > 0 ||
+    modalidadFiltro.length > 0 ||
+    !!numeroFiltro ||
+    !!itemFiltro ||
+    !!paginaFiltro ||
+    !!numeralGrupoFiltro ||
+    !!numeralServicioFiltro
 
   return (
     <Card>
@@ -598,6 +691,78 @@ function CriteriosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
           Ancho fijo por campo para que quepan los 6 filtros + Exportar en
           una sola línea. */}
       <FilterBar sticky className="top-12">
+        <CampoFiltro label="No." className="w-14">
+          <input
+            value={numeroFiltro}
+            inputMode="numeric"
+            onChange={(e) => {
+              setPagina(0)
+              setNumeroFiltro(e.target.value)
+            }}
+            className="campo"
+          />
+        </CampoFiltro>
+        <CampoFiltro label="Item" className="w-14">
+          <input
+            value={itemFiltro}
+            onChange={(e) => {
+              setPagina(0)
+              setItemFiltro(e.target.value)
+            }}
+            className="campo"
+          />
+        </CampoFiltro>
+        <CampoFiltro label="Página" className="w-16">
+          <select
+            value={paginaFiltro}
+            onChange={(e) => {
+              setPagina(0)
+              setPaginaFiltro(e.target.value)
+            }}
+            className="campo"
+          >
+            <option value="">Todas</option>
+            {opcionesPaginaFiltro.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
+            ))}
+          </select>
+        </CampoFiltro>
+        <CampoFiltro label="Num. grupo" className="w-20">
+          <select
+            value={numeralGrupoFiltro}
+            onChange={(e) => {
+              setPagina(0)
+              setNumeralGrupoFiltro(e.target.value)
+            }}
+            className="campo"
+          >
+            <option value="">Todos</option>
+            {opcionesNumeralGrupoFiltro.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
+            ))}
+          </select>
+        </CampoFiltro>
+        <CampoFiltro label="Num. servicio" className="w-24">
+          <select
+            value={numeralServicioFiltro}
+            onChange={(e) => {
+              setPagina(0)
+              setNumeralServicioFiltro(e.target.value)
+            }}
+            className="campo"
+          >
+            <option value="">Todos</option>
+            {opcionesNumeralServicioFiltro.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
+            ))}
+          </select>
+        </CampoFiltro>
         <CampoFiltro label="Buscar en criterio" className="w-24">
           <input
             value={busqueda}
@@ -695,8 +860,13 @@ function CriteriosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
             setEstandarFiltro('')
             setComplejidadFiltro([])
             setModalidadFiltro([])
+            setNumeroFiltro('')
+            setItemFiltro('')
+            setPaginaFiltro('')
+            setNumeralGrupoFiltro('')
+            setNumeralServicioFiltro('')
           }}
-          disabled={!busqueda && !servicioFiltro && !grupoFiltro && !estandarFiltro && complejidadFiltro.length === 0 && modalidadFiltro.length === 0}
+          disabled={!hayFiltros}
         >
           Limpiar
         </Boton>
@@ -879,9 +1049,14 @@ function ModalEditarCriterioCatalogo({
     setGuardando(true)
 
     // numeral_grupo/numeral_servicio se derivan del Grupo/Servicio elegidos,
-    // para que no queden inconsistentes con las FKs reales.
+    // para que no queden inconsistentes con las FKs reales — salvo que el
+    // Servicio no cambie: los criterios del grupo universal (Res.3100 11.1)
+    // guardan el sub-numeral del estándar (11.1.4, 11.1.5…) que no existe en
+    // la tabla de servicios, y recalcularlo lo pisaba con "11.1".
     const { data: g } = await supabase.from(cfg.tablaGrupos).select('numeral').eq('id', grupoId).single()
     const { data: s } = await supabase.from(cfg.tablaServicios).select('numeral').eq('id', servicioId).single()
+    const mismoServicio = registro && registro !== 'nuevo' && registro.servicio_id === servicioId
+    const numeralServicio = mismoServicio ? registro.numeral_servicio : s?.numeral ?? ''
 
     const payload = {
       llave: llave || `manual-${Date.now()}`,
@@ -892,7 +1067,7 @@ function ModalEditarCriterioCatalogo({
       [cfg.columnaGrupoId]: grupoId,
       [cfg.columnaServicioId]: servicioId,
       numeral_grupo: g?.numeral ?? '',
-      numeral_servicio: s?.numeral ?? '',
+      numeral_servicio: numeralServicio,
       estandar,
       complejidad,
       modalidad: modalidad || null,
@@ -959,7 +1134,7 @@ function ModalEditarCriterioCatalogo({
         {registro && registro !== 'nuevo' && (
           <div className="grid grid-cols-2 gap-3 text-xs text-slate-400">
             <div>Numeral Grupo: {registro.numeral_grupo} (se recalcula al guardar)</div>
-            <div>Numeral Servicio: {registro.numeral_servicio} (se recalcula al guardar)</div>
+            <div>Numeral Servicio: {registro.numeral_servicio} (se recalcula si cambias el Servicio)</div>
           </div>
         )}
         <div className="grid grid-cols-3 gap-3">
