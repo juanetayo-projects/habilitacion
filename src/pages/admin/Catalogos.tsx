@@ -3,6 +3,15 @@ import { supabase } from '../../lib/supabase'
 import { Badge, Boton, Card, FilterBar, Modal, SelectorDesplegable, Spinner } from '../../components/ui/ui'
 import { exportarCriteriosExcel, exportarServiciosExcel } from '../../lib/exportarCatalogo'
 import { RESOLUCIONES, type ResolucionKey } from '../../domain/resoluciones'
+import {
+  aplicarCriterios,
+  aplicarServicios,
+  descargarPlantillaCriterios,
+  descargarPlantillaServicios,
+  leerPlantillaCriterios,
+  leerPlantillaServicios,
+} from '../../lib/plantillaCatalogo'
+import { ModalImportarPlantilla } from '../../components/catalogos/ModalImportarPlantilla'
 
 const LOGO_URL = `${import.meta.env.BASE_URL}images/logo_cacsb2.png`
 
@@ -139,6 +148,8 @@ function ServiciosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
   const [busqueda, setBusqueda] = useState('')
   const [grupoFiltro, setGrupoFiltro] = useState<number | ''>('')
   const [exportando, setExportando] = useState(false)
+  const [generandoPlantilla, setGenerandoPlantilla] = useState(false)
+  const [importando, setImportando] = useState(false)
 
   useEffect(() => {
     cargar()
@@ -197,6 +208,30 @@ function ServiciosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
     }
   }
 
+  // Plantilla para diligenciar a mano (pedido 2026-10-29): trae los
+  // servicios visibles con su ID para editarlos, y se le agregan filas
+  // nuevas al final — ver plantillaCatalogo.ts.
+  async function descargarPlantilla() {
+    setGenerandoPlantilla(true)
+    try {
+      await descargarPlantillaServicios({
+        cfg,
+        grupos: grupos.map((g) => g.nombre),
+        servicios: filtrados.map((s) => ({
+          id: s.id,
+          numeral: s.numeral,
+          grupo: s.grupo?.nombre ?? '',
+          nombre: s.nombre,
+          descripcion: s.descripcion,
+          estructura: s.estructura,
+          activo: s.activo,
+        })),
+      })
+    } finally {
+      setGenerandoPlantilla(false)
+    }
+  }
+
   return (
     <Card>
       <p className="mb-4 text-xs text-slate-500">
@@ -236,7 +271,19 @@ function ServiciosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
         >
           Limpiar filtros
         </Boton>
-        <Boton variante="secundario" onClick={exportarExcel} disabled={exportando} className="ml-auto">
+        <Boton
+          variante="secundario"
+          onClick={descargarPlantilla}
+          disabled={generandoPlantilla || cargando}
+          className="ml-auto"
+          title="Descargar la plantilla Excel para diligenciar e importar"
+        >
+          {generandoPlantilla ? 'Generando…' : 'Plantilla'}
+        </Boton>
+        <Boton variante="secundario" onClick={() => setImportando(true)} title="Importar una plantilla diligenciada">
+          Importar
+        </Boton>
+        <Boton variante="secundario" onClick={exportarExcel} disabled={exportando}>
           {exportando ? 'Exportando…' : 'Exportar Excel'}
         </Boton>
       </FilterBar>
@@ -292,6 +339,15 @@ function ServiciosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
         grupos={grupos}
         onClose={() => setEditando(null)}
         onGuardado={cargar}
+      />
+
+      <ModalImportarPlantilla
+        open={importando}
+        onClose={() => setImportando(false)}
+        titulo={`Importar servicios (${cfg.labelCorto})`}
+        leer={(archivo) => leerPlantillaServicios(archivo, cfg)}
+        aplicar={(lectura) => aplicarServicios(cfg, lectura)}
+        onImportado={cargar}
       />
     </Card>
   )
@@ -475,6 +531,8 @@ function CriteriosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
   const [opcionesModalidadFiltro, setOpcionesModalidadFiltro] = useState<string[]>([])
   const [cargando, setCargando] = useState(true)
   const [exportando, setExportando] = useState(false)
+  const [generandoPlantilla, setGenerandoPlantilla] = useState(false)
+  const [importando, setImportando] = useState(false)
   const [editando, setEditando] = useState<CriterioCatalogo | 'nuevo' | null>(null)
   const [eliminando, setEliminando] = useState<CriterioCatalogo | null>(null)
 
@@ -586,6 +644,9 @@ function CriteriosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
       .from(cfg.tablaCriterios)
       .select(columnas, conteo ? { count: 'exact' } : undefined)
       .order('numero')
+      // Desempate por id: `numero` se repite y, sin un orden total, la
+      // lectura por bloques podía duplicar u omitir filas entre un bloque y otro.
+      .order('id')
 
     if (busqueda) query = query.ilike('criterio', `%${busqueda}%`)
     if (servicioFiltro) query = query.eq(cfg.columnaServicioId, servicioFiltro)
@@ -617,8 +678,11 @@ function CriteriosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
     setExportando(true)
     try {
       const columnas = `numero, item, pagina, criterio, numeral_grupo, numeral_servicio, estandar, complejidad, modalidad, grupo:${cfg.tablaGrupos}(nombre), servicio:${cfg.tablaServicios}(nombre)`
-      const { data } = await construirQuery(columnas, false)
-      const filas = (data ?? []) as unknown as (Omit<CriterioCatalogo, 'id' | 'llave' | 'grupo_id' | 'servicio_id'>)[]
+      // Por bloques: PostgREST corta en 1.000 filas y Res.3100 tiene ~3.900
+      // criterios — sin esto el Excel salía incompleto.
+      const filas = await leerTodasLasFilas<Omit<CriterioCatalogo, 'id' | 'llave' | 'grupo_id' | 'servicio_id'>>(
+        () => construirQuery(columnas, false),
+      )
       await exportarCriteriosExcel({
         filtros: [
           ['Buscar en criterio', busqueda || 'Todos'],
@@ -651,6 +715,40 @@ function CriteriosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
       })
     } finally {
       setExportando(false)
+    }
+  }
+
+  // Plantilla para diligenciar a mano (pedido 2026-10-29): mismos filtros
+  // que la tabla, con el ID de cada criterio para poder editarlo; las
+  // listas desplegables salen de los valores reales del catálogo.
+  async function descargarPlantilla() {
+    setGenerandoPlantilla(true)
+    try {
+      const columnas = `id, numero, item, pagina, criterio, numeral_servicio, estandar, complejidad, modalidad, grupo:${cfg.tablaGrupos}(nombre), servicio:${cfg.tablaServicios}(nombre)`
+      const filas = await leerTodasLasFilas<CriterioCatalogo>(() => construirQuery(columnas, false))
+      await descargarPlantillaCriterios({
+        cfg,
+        grupos: grupos.map((g) => g.nombre),
+        servicios: Array.from(new Set(serviciosFull.filter((s) => s.activo).map((s) => s.nombre))).sort(),
+        estandares: opcionesEstandar,
+        complejidades: opcionesComplejidad,
+        modalidades: opcionesModalidad,
+        criterios: filas.map((c) => ({
+          id: c.id,
+          numero: c.numero,
+          item: c.item,
+          pagina: c.pagina,
+          criterio: c.criterio,
+          grupo: c.grupo?.nombre ?? '',
+          servicio: c.servicio?.nombre ?? '',
+          numeral_servicio: c.numeral_servicio,
+          estandar: c.estandar,
+          complejidad: c.complejidad,
+          modalidad: c.modalidad,
+        })),
+      })
+    } finally {
+      setGenerandoPlantilla(false)
     }
   }
 
@@ -870,6 +968,23 @@ function CriteriosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
         >
           Limpiar
         </Boton>
+        <Boton
+          variante="secundario"
+          onClick={descargarPlantilla}
+          disabled={generandoPlantilla}
+          className="shrink-0 px-3"
+          title="Descargar la plantilla Excel para diligenciar e importar"
+        >
+          {generandoPlantilla ? 'Generando…' : 'Plantilla'}
+        </Boton>
+        <Boton
+          variante="secundario"
+          onClick={() => setImportando(true)}
+          className="shrink-0 px-3"
+          title="Importar una plantilla diligenciada"
+        >
+          Importar
+        </Boton>
         <Boton variante="secundario" onClick={exportarExcel} disabled={exportando} className="shrink-0 px-3">
           {exportando ? 'Exportando…' : 'Exportar'}
         </Boton>
@@ -964,6 +1079,15 @@ function CriteriosCatalogoTab({ resolucion }: { resolucion: ResolucionKey }) {
         opcionesModalidad={opcionesModalidad}
         onClose={() => setEditando(null)}
         onGuardado={cargar}
+      />
+
+      <ModalImportarPlantilla
+        open={importando}
+        onClose={() => setImportando(false)}
+        titulo={`Importar criterios (${cfg.labelCorto})`}
+        leer={(archivo) => leerPlantillaCriterios(archivo, cfg)}
+        aplicar={(lectura) => aplicarCriterios(cfg, lectura)}
+        onImportado={cargar}
       />
 
       <Modal open={!!eliminando} onClose={() => setEliminando(null)} titulo="Eliminar criterio">

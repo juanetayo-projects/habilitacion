@@ -59,7 +59,9 @@ export async function exportarAutoevaluacionExcel(params: {
   const ExcelJS = (await import('exceljs')).default
   const wb = new ExcelJS.Workbook()
   const ws = wb.addWorksheet('Auto-evaluación', {
-    pageSetup: { orientation: 'landscape', fitToPage: true },
+    // Sin fitToPage: junto con outlineProperties hace que ExcelJS genere un
+    // <sheetPr> que Excel rechaza (ver nota en exportarCatalogo.ts).
+    pageSetup: { orientation: 'landscape' },
   })
   // Agrupación nativa de filas de Excel (los +/- del margen izquierdo): la
   // cabecera de cada Estándar queda en outlineLevel 0 y sirve de resumen;

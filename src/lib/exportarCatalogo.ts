@@ -5,6 +5,12 @@
 // imagen usa fila entera (row: 0, sin fracciones) y no se configuran
 // `views` de la hoja: ambas cosas produjeron archivos .xlsx corruptos que
 // Excel reparaba al abrir.
+//
+// Tampoco se usa `fitToPage` (bug 2026-10-29, Excel "en blanco" de Servicios
+// Res.3100): combinado con `outlineProperties`, ExcelJS escribe
+// <pageSetUpPr> ANTES de <outlinePr> dentro de <sheetPr>, orden que el
+// esquema de Excel no admite — Excel descartaba sheet1.xml completo al
+// "reparar" y la hoja quedaba vacía ("Línea 2, columna 0").
 
 const AZUL = '0D2D6B'
 const PALETA_GRUPOS = ['2563EB', 'D97706', '059669', '9333EA', 'E11D48', '0891B2', 'EA580C', '475569']
@@ -16,7 +22,7 @@ function colorPorIndice(paleta: string[], indice: number) {
 async function crearLibro(titulo: string, subtitulo: string, filtros: [string, string][], logoUrl?: string) {
   const ExcelJS = (await import('exceljs')).default
   const wb = new ExcelJS.Workbook()
-  const ws = wb.addWorksheet('Datos', { pageSetup: { orientation: 'landscape', fitToPage: true } })
+  const ws = wb.addWorksheet('Datos', { pageSetup: { orientation: 'landscape' } })
   // Agrupación nativa de filas de Excel (los +/- del margen izquierdo): la
   // fila de cabecera de cada grupo (color) queda en outlineLevel 0 y sirve
   // de resumen; las filas de datos van en nivel 1. summaryBelow:false
@@ -60,7 +66,7 @@ async function crearLibro(titulo: string, subtitulo: string, filtros: [string, s
   return { wb, ws, fila }
 }
 
-function descargar(buf: ArrayBuffer, nombreArchivo: string) {
+export function descargar(buf: ArrayBuffer, nombreArchivo: string) {
   const url = URL.createObjectURL(
     new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
   )
