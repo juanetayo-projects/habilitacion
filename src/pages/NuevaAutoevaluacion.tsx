@@ -257,7 +257,8 @@ export default function NuevaAutoevaluacion() {
     // y Alta"), que romperían el separador de in.(...) sin comillas.
     let propios = supabase.from(cfg.tablaCriterios).select(columnas).eq(cfg.columnaServicioId, servicioId)
     if (modalidad.length > 0) {
-      propios = propios.or(`${filtroIn('modalidad', modalidad)},modalidad.is.null`)
+      // "Todas" y "No aplica" son comodín: el criterio aplica a cualquier modalidad.
+      propios = propios.or(`${filtroIn('modalidad', [...modalidad, 'Todas', 'No aplica'])},modalidad.is.null`)
     }
     if (complejidad.length > 0) {
       propios = propios.or(`${filtroIn('complejidad', complejidad)},complejidad.eq.Todas,complejidad.eq.No aplica`)
