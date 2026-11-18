@@ -38,3 +38,6 @@ scripts/sync/.env
 *.njsproj
 *.sln
 *.sw?
+
+# Respaldos locales de catálogos
+backups/
